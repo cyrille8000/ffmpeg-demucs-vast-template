@@ -1,0 +1,36 @@
+# Resultats et fichiers temporaires
+mvsep/results/
+mvsep/segments/
+mvsep/web_videos/
+mvsep/web_segments/
+*.mp3
+*.mp4
+*.webm
+*.wav
+
+# Modeles (telecharges au runtime)
+mvsep/models/*.onnx
+mvsep/models/*.th
+models_part_*
+models_complete.zip
+
+# Cookies et credentials
+*cookies*.txt
+*.env
+.env*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
