@@ -131,10 +131,14 @@ RUN mkdir -p /workspace/model_weights && \
 # =============================================================================
 # [6/7] PATCH PYTORCH 2.6+ COMPATIBILITE
 # =============================================================================
-RUN DEMUCS_STATES=$(python3 -c "import demucs.states; print(demucs.states.__file__)" 2>/dev/null) && \
+# Note: Le patch peut echouer si demucs n'est pas installe ou si le fichier n'existe pas
+# On utilise || true pour ne pas bloquer le build
+RUN DEMUCS_STATES=$(python3 -c "import demucs.states; print(demucs.states.__file__)" 2>/dev/null || echo "") && \
     if [ -n "$DEMUCS_STATES" ] && [ -f "$DEMUCS_STATES" ]; then \
-        sed -i "s/torch.load(path, 'cpu')/torch.load(path, 'cpu', weights_only=False)/g" "$DEMUCS_STATES" && \
-        echo "Patch PyTorch 2.6+ applique"; \
+        sed -i "s/torch.load(path, 'cpu')/torch.load(path, 'cpu', weights_only=False)/g" "$DEMUCS_STATES" 2>/dev/null && \
+        echo "Patch PyTorch 2.6+ applique" || echo "Patch non necessaire ou deja applique"; \
+    else \
+        echo "demucs.states non trouve, patch ignore"; \
     fi
 
 # =============================================================================
