@@ -24,7 +24,7 @@
 #   ffmpeg-demucs --help
 # =============================================================================
 
-FROM vastai/pytorch:2.4.1-cuda-12.4.1-py311-22.04
+FROM vastai/pytorch:cuda-13.0.2-auto
 
 SHELL ["/bin/bash", "-c"]
 
