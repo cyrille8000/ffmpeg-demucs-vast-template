@@ -1,13 +1,11 @@
 # =============================================================================
-# FFmpeg + Demucs Template for Vast.ai
+# Demucs Audio Separation Template for Vast.ai
 # =============================================================================
 # Image optimisee pour Vast.ai avec:
 #   - PyTorch + CUDA (pre-cache sur Vast.ai)
-#   - JupyterLab
-#   - FFmpeg (apt)
 #   - Demucs + ONNX Runtime GPU (packages compatibles Cloudflare)
-#   - CLI ffmpeg-demucs pour separation audio
-#   - Poids des modeles (telecharges, extraction au premier demarrage)
+#   - FFmpeg (conversion audio)
+#   - CLI demucs-separate pour separation audio
 #
 # TAILLE IMAGE: ~6-7 GB
 # PREMIER DEMARRAGE: +2 min pour extraction des modeles
@@ -17,11 +15,9 @@
 #   Les modeles seront extraits automatiquement au premier demarrage
 #
 # CLI:
-#   ffmpeg-demucs --input-url-youtube "https://..." --output ./results
-#   ffmpeg-demucs --input-url-youtube "https://..." --file-cookie "https://url/cookies.txt" --output ./results
-#   ffmpeg-demucs --input-url-youtube "https://..." --interval-cut "5.6,475.1,800.5" --output ./results
-#   ffmpeg-demucs --input-file audio.mp3 --only-vocals --output ./results
-#   ffmpeg-demucs --help
+#   demucs-separate --input "https://url/audio.mp3" --output ./results
+#   demucs-separate --input "/path/to/local/audio.wav" --output ./results
+#   demucs-separate --help
 # =============================================================================
 
 FROM vastai/pytorch:cuda-13.0.2-auto
@@ -40,22 +36,14 @@ ENV MODELS_EXTRACTED="false"
 # =============================================================================
 RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
-    bc \
     ffmpeg \
-    xz-utils \
     libsndfile1 \
-    libopus0 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # =============================================================================
 # [2/7] PACKAGES COMPATIBLES CLOUDFLARE EN PREMIER
 # =============================================================================
-# IMPORTANT: Installer les packages Cloudflare AVANT pip pour eviter les conflits
-# Ces packages contiennent:
-#   - onnxruntime-gpu compatible CUDA 12.4
-#   - numpy 1.x (requis par PyTorch 2.4)
-#   - scipy, numba, etc. versions compatibles
 RUN cd /tmp && \
     echo "Telechargement packages compatibles..." && \
     wget -q -O packages_compatibles.zip "$BASE_URL/packages_compatibles.zip" && \
@@ -93,9 +81,8 @@ RUN cd /tmp && \
     echo "Packages compatibles installes"
 
 # =============================================================================
-# [3/7] DEPENDANCES CRITIQUES (exactement comme demucsServe.sh ligne 328)
+# [3/7] DEPENDANCES CRITIQUES
 # =============================================================================
-# UNIQUEMENT ces 5 packages - demucs/librosa/soundfile sont dans Cloudflare
 RUN pip install --no-cache-dir \
     scikit-learn \
     decorator \
@@ -108,7 +95,6 @@ RUN pip install --no-cache-dir \
 # =============================================================================
 WORKDIR /workspace
 
-# Copier uniquement le dossier mvsep (pas de git clone pour eviter info sensibles)
 COPY mvsep/ /workspace/mvsep/
 
 RUN cd /workspace/mvsep && \
@@ -118,8 +104,6 @@ RUN cd /workspace/mvsep && \
 # =============================================================================
 # [5/7] TELECHARGER LES POIDS (SANS EXTRAIRE)
 # =============================================================================
-# Les poids sont telecharges dans /workspace/model_weights/
-# L'extraction se fait au premier demarrage via start.sh
 RUN mkdir -p /workspace/model_weights && \
     cd /workspace/model_weights && \
     echo "Telechargement des poids des modeles (~2 GB)..." && \
@@ -131,8 +115,6 @@ RUN mkdir -p /workspace/model_weights && \
 # =============================================================================
 # [6/7] PATCH PYTORCH 2.6+ COMPATIBILITE
 # =============================================================================
-# Note: Le patch peut echouer si demucs n'est pas installe ou si le fichier n'existe pas
-# On utilise || true pour ne pas bloquer le build
 RUN DEMUCS_STATES=$(python3 -c "import demucs.states; print(demucs.states.__file__)" 2>/dev/null || echo "") && \
     if [ -n "$DEMUCS_STATES" ] && [ -f "$DEMUCS_STATES" ]; then \
         sed -i "s/torch.load(path, 'cpu')/torch.load(path, 'cpu', weights_only=False)/g" "$DEMUCS_STATES" 2>/dev/null && \
@@ -142,9 +124,8 @@ RUN DEMUCS_STATES=$(python3 -c "import demucs.states; print(demucs.states.__file
     fi
 
 # =============================================================================
-# [7/7] FIX COMPATIBILITE NUMPY/NUMBA (demucsServe.sh lignes 338-352)
+# [7/7] FIX COMPATIBILITE NUMPY/NUMBA
 # =============================================================================
-# Numba requiert NumPy < 2.3 - downgrade si necessaire
 RUN echo "Verification compatibilite NumPy/Numba..." && \
     NUMPY_VERSION=$(python3 -c "import numpy; print(numpy.__version__)" 2>/dev/null) && \
     echo "NumPy actuel: $NUMPY_VERSION" && \
@@ -162,11 +143,9 @@ RUN echo "Verification compatibilite NumPy/Numba..." && \
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
-# CLI ffmpeg-demucs (outil en ligne de commande)
-COPY ffmpeg-demucs /usr/local/bin/ffmpeg-demucs
-RUN chmod +x /usr/local/bin/ffmpeg-demucs
+COPY demucs-separate /usr/local/bin/demucs-separate
+RUN chmod +x /usr/local/bin/demucs-separate
 
-# Creer les repertoires pour les modeles
 RUN mkdir -p /models-cache \
     && mkdir -p /root/.cache/torch/hub/checkpoints
 
@@ -174,10 +153,4 @@ WORKDIR /workspace/mvsep
 
 EXPOSE 8888 8185
 
-# =============================================================================
-# ENTRYPOINT
-# =============================================================================
-# Au demarrage:
-# 1. Extrait les modeles si pas deja fait
-# 2. Lance JupyterLab
 CMD ["/start.sh"]
