@@ -16,6 +16,7 @@
 #
 # CLI:
 #   demucs-separate --input "https://url/audio.mp3" --output ./results
+#   demucs-separate --input "https://url/audio.mp3" --interval-cut "300,600,900" --output ./results
 #   demucs-separate --input "/path/to/local/audio.wav" --output ./results
 #   demucs-separate --help
 # =============================================================================

@@ -2,12 +2,14 @@
 # =============================================================================
 # DEMUCS-SEPARATE CLI - Audio Separation Tool
 # =============================================================================
-# Simple CLI for Demucs audio separation:
+# CLI for Demucs audio separation:
 #   - Input: URL (public/signed) or local audio file
+#   - Interval cutting: Split audio at specified timestamps
 #   - Output: Separated audio (vocals + instrumental)
 #
 # Usage:
 #   demucs-separate --input "https://url/audio.mp3" --output ./results
+#   demucs-separate --input "https://url/audio.mp3" --interval-cut "300,600,900" --output ./results
 #   demucs-separate --input "/path/to/audio.wav" --output ./results
 #   demucs-separate --help
 # =============================================================================
@@ -21,13 +23,16 @@ import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
-__VERSION__ = '1.0.0'
+__VERSION__ = '1.2.0'
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 MVSEP_DIR = '/workspace/mvsep'
 INFERENCE_SCRIPT = f'{MVSEP_DIR}/inference_demucs.py'
+
+# Audio cutting parameters
+DEFAULT_SEGMENT_DURATION = 300  # 5 minutes max per segment
 
 # Demucs parameters
 MODEL_OVERHEAD = 4
@@ -146,13 +151,115 @@ def get_audio_duration(file_path):
     return None
 
 
+def seconds_to_timecode(seconds):
+    """Convert seconds to HH:MM:SS.ms format."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:05.2f}"
+
+
+# =============================================================================
+# INTERVAL CUTTING
+# =============================================================================
+def parse_intervals(timestamps_str, audio_duration):
+    """
+    Parse timestamps and generate intervals.
+
+    Input: "300,600,900" with audio_duration=1200
+    Output: [(0, 300), (300, 600), (600, 900), (900, 1200)]
+    """
+    try:
+        timestamps = [float(t.strip()) for t in timestamps_str.split(',') if t.strip()]
+
+        if not timestamps:
+            log_error("No valid timestamps provided")
+            return None
+
+        timestamps = sorted(timestamps)
+
+        intervals = []
+        prev = 0.0
+
+        for ts in timestamps:
+            if ts > prev:
+                intervals.append((prev, ts))
+                prev = ts
+
+        # Add final segment to end of audio
+        if audio_duration and audio_duration > prev:
+            intervals.append((prev, audio_duration))
+
+        return intervals
+
+    except ValueError as e:
+        log_error(f"Invalid timestamp format: {e}")
+        return None
+
+
+def generate_auto_intervals(audio_duration, max_segment_duration=DEFAULT_SEGMENT_DURATION):
+    """
+    Generate automatic intervals based on max segment duration.
+
+    Input: audio_duration=720, max_segment_duration=300
+    Output: [(0, 300), (300, 600), (600, 720)]
+    """
+    if audio_duration <= max_segment_duration:
+        # No need to cut, single segment
+        return [(0, audio_duration)]
+
+    intervals = []
+    current = 0.0
+
+    while current < audio_duration:
+        end = min(current + max_segment_duration, audio_duration)
+        intervals.append((current, end))
+        current = end
+
+    return intervals
+
+
+def cut_audio_segments(input_file, output_dir, intervals):
+    """Cut audio into segments at specified intervals."""
+    log("Cutting audio into segments...")
+
+    segments = []
+    ext = input_file.suffix
+
+    for idx, (start, end) in enumerate(intervals):
+        duration = end - start
+        output_file = output_dir / f"segment_{idx:03d}{ext}"
+
+        log(f"  Segment {idx}: {seconds_to_timecode(start)} -> {seconds_to_timecode(end)} ({duration:.1f}s)")
+
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', str(input_file),
+            '-ss', str(start),
+            '-t', str(duration),
+            '-c', 'copy',
+            str(output_file)
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            segments.append(output_file)
+        else:
+            log_error(f"Failed to cut segment {idx}: {result.stderr}")
+
+    log(f"  Created {len(segments)} audio segments")
+    return segments
+
+
 # =============================================================================
 # DEMUCS
 # =============================================================================
-def run_demucs(input_file, output_folder, chunk_size, only_vocals=True):
+def run_demucs(input_files, output_folder, chunk_size, only_vocals=True):
     """Run Demucs with auto chunk reduction on OOM."""
-    log(f"Running Demucs...")
-    log(f"  Input: {input_file}")
+    if isinstance(input_files, Path):
+        input_files = [input_files]
+
+    log(f"Running Demucs on {len(input_files)} file(s)...")
     log(f"  Output: {output_folder}")
     log(f"  Chunk size: {chunk_size}")
 
@@ -171,7 +278,7 @@ def run_demucs(input_file, output_folder, chunk_size, only_vocals=True):
 
         cmd = [
             'python3', INFERENCE_SCRIPT,
-            '--input_audio', str(input_file),
+            '--input_audio'] + [str(f) for f in input_files] + [
             '--output_folder', str(output_folder),
             '--large_gpu',
             '--overlap_large', str(OVERLAP_LARGE),
@@ -227,14 +334,21 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  # From URL (public or signed)
+  # From URL - auto-cuts into 5min segments
   demucs-separate --input "https://example.com/audio.mp3" --output ./results
+
+  # With custom intervals (timestamps in seconds)
+  # Creates segments: [0->300s], [300s->600s], [600s->900s], [900s->END]
+  demucs-separate --input "https://..." --interval-cut "300,600,900" --output ./results
 
   # From local file
   demucs-separate --input /path/to/audio.wav --output ./results
 
   # Extract all stems (vocals, drums, bass, other)
   demucs-separate --input audio.mp3 --output ./results --all-stems
+
+Note: By default, audio files are automatically split into 5-minute segments.
+      Use --interval-cut to specify custom cut points.
 '''
     )
 
@@ -243,6 +357,8 @@ Examples:
                         help='Audio file path or URL (public/signed)')
     parser.add_argument('--output', '-o', type=str, required=True,
                         help='Output folder for results')
+    parser.add_argument('--interval-cut', type=str,
+                        help='Timestamps in seconds to cut audio (e.g., "300,600,900")')
     parser.add_argument('--all-stems', action='store_true',
                         help='Extract all stems (vocals, drums, bass, other)')
 
@@ -293,8 +409,42 @@ Examples:
             seconds = int(duration % 60)
             log(f"Audio duration: {minutes}m {seconds}s")
 
+        # Handle interval cutting
+        files_to_process = []
+        segments_dir = output_dir / 'segments'
+
+        if args.interval_cut:
+            log("\nParsing custom intervals...")
+            intervals = parse_intervals(args.interval_cut, duration)
+
+            if intervals is None:
+                sys.exit(1)
+        else:
+            # Auto-generate intervals (max 5 min per segment)
+            log(f"\nAuto-generating intervals (max {DEFAULT_SEGMENT_DURATION}s per segment)...")
+            intervals = generate_auto_intervals(duration)
+
+        log(f"  {len(intervals)} segment(s) to process")
+        for idx, (start, end) in enumerate(intervals):
+            log(f"    [{idx}] {seconds_to_timecode(start)} -> {seconds_to_timecode(end)} ({end-start:.1f}s)")
+
+        # Cut audio if more than 1 segment
+        if len(intervals) > 1:
+            segments_dir.mkdir(parents=True, exist_ok=True)
+            files_to_process = cut_audio_segments(input_file, segments_dir, intervals)
+
+            if not files_to_process:
+                log_error("No segments created")
+                sys.exit(1)
+        else:
+            # Single segment, process full file
+            files_to_process = [input_file]
+
         # Run Demucs
-        if not run_demucs(input_file, output_dir, chunk_size, only_vocals):
+        demucs_output = output_dir / 'demucs_results'
+        demucs_output.mkdir(parents=True, exist_ok=True)
+
+        if not run_demucs(files_to_process, demucs_output, chunk_size, only_vocals):
             sys.exit(1)
 
         # Summary
@@ -303,11 +453,14 @@ Examples:
         log("=" * 50)
         log(f"  Output: {output_dir}")
 
+        if len(intervals) > 1:
+            log(f"  Segments: {segments_dir} ({len(intervals)} files)")
+
+        log(f"  Demucs results: {demucs_output}")
+
         # List output files
-        output_files = list(output_dir.rglob('*.mp3')) + list(output_dir.rglob('*.wav'))
+        output_files = list(demucs_output.rglob('*.mp3')) + list(demucs_output.rglob('*.wav'))
         log(f"  Files created: {len(output_files)}")
-        for f in output_files:
-            log(f"    - {f.relative_to(output_dir)}")
 
     finally:
         if temp_dir:
