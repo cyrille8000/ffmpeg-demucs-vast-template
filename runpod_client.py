@@ -65,8 +65,7 @@ class RunPodClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
+            "Content-Type": "application/json"
         }
         self.active_pod_id = None
         self.pod_url = None
@@ -77,8 +76,11 @@ class RunPodClient:
         if variables:
             payload["variables"] = variables
 
+        # API key goes in URL, not header
+        url = f"{RUNPOD_API_URL}?api_key={self.api_key}"
+
         response = requests.post(
-            RUNPOD_API_URL,
+            url,
             headers=self.headers,
             json=payload,
             timeout=30
@@ -96,7 +98,7 @@ class RunPodClient:
                 memoryInGb
                 secureCloud
                 communityCloud
-                lowestPrice(gpuCount: 1) {
+                lowestPrice(input: {gpuCount: 1}) {
                     minimumBidPrice
                     uninterruptablePrice
                 }
