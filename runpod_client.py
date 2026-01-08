@@ -89,7 +89,7 @@ class RunPodClient:
         return response.json()
 
     def get_available_gpus(self) -> List[Dict]:
-        """Get list of available GPU types with pricing."""
+        """Get list of available GPU types with pricing and stock status."""
         query = """
         query GpuTypes {
             gpuTypes {
@@ -101,6 +101,9 @@ class RunPodClient:
                 lowestPrice(input: {gpuCount: 1}) {
                     minimumBidPrice
                     uninterruptablePrice
+                    stockStatus
+                    totalCount
+                    rentedCount
                 }
             }
         }
@@ -112,12 +115,22 @@ class RunPodClient:
 
         gpus = result.get("data", {}).get("gpuTypes", [])
 
-        # Filter and sort by price
+        # Filter by VRAM and availability
         available = []
         for gpu in gpus:
             if gpu.get("memoryInGb", 0) >= MIN_VRAM_GB:
                 price_info = gpu.get("lowestPrice", {}) or {}
                 price = price_info.get("minimumBidPrice") or price_info.get("uninterruptablePrice") or 999
+
+                # Check stock availability
+                total = price_info.get("totalCount", 0) or 0
+                rented = price_info.get("rentedCount", 0) or 0
+                stock_status = price_info.get("stockStatus", "")
+
+                # Skip if no stock available
+                available_count = total - rented
+                if available_count <= 0 and stock_status.lower() in ["unavailable", "out of stock", ""]:
+                    continue
 
                 available.append({
                     "id": gpu["id"],
@@ -125,7 +138,9 @@ class RunPodClient:
                     "vram_gb": gpu.get("memoryInGb", 0),
                     "price_per_hour": price,
                     "secure": gpu.get("secureCloud", False),
-                    "community": gpu.get("communityCloud", False)
+                    "community": gpu.get("communityCloud", False),
+                    "stock_status": stock_status,
+                    "available_count": available_count
                 })
 
         # Sort by price (cheapest first)
@@ -414,12 +429,13 @@ def cmd_gpus(args):
     client = RunPodClient(os.environ.get("RUNPOD_API_KEY", ""))
     gpus = client.get_available_gpus()
 
-    print(f"\n{'GPU Name':<30} {'VRAM':<8} {'$/hr':<10} {'Available'}")
-    print("-" * 60)
+    print(f"\n{'GPU Name':<30} {'VRAM':<6} {'$/hr':<8} {'Stock':<12} {'Cloud'}")
+    print("-" * 70)
 
     for gpu in gpus[:20]:
-        available = "Community" if gpu["community"] else ("Secure" if gpu["secure"] else "No")
-        print(f"{gpu['name']:<30} {gpu['vram_gb']:<8} ${gpu['price_per_hour']:<9.3f} {available}")
+        cloud = "Community" if gpu["community"] else ("Secure" if gpu["secure"] else "-")
+        stock = gpu.get("stock_status", "") or f"{gpu.get('available_count', '?')} avail"
+        print(f"{gpu['name']:<30} {gpu['vram_gb']:<6} ${gpu['price_per_hour']:<7.3f} {stock:<12} {cloud}")
 
 
 def cmd_separate(args):
