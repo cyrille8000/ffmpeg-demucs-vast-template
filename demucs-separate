@@ -6,6 +6,8 @@
 #   - Input: URL (public/signed) or local audio file
 #   - Interval cutting: Split audio at specified timestamps
 #   - Output: Separated audio (vocals + instrumental)
+#   - Progress tracking via progress.txt file (updated every 10s)
+#   - Final output: concatenated instrumental as mono MP3
 #
 # Usage:
 #   demucs-separate --input "https://url/audio.mp3" --output ./results
@@ -15,21 +17,26 @@
 # =============================================================================
 
 import argparse
+import json
 import os
 import sys
 import subprocess
 import tempfile
 import shutil
+import time
+import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
-__VERSION__ = '1.2.0'
+__VERSION__ = '1.6.0'
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 MVSEP_DIR = '/workspace/mvsep'
 INFERENCE_SCRIPT = f'{MVSEP_DIR}/inference_demucs.py'
+MODELS_CACHE = '/models-cache'
+MODELS_READY_FILE = f'{MODELS_CACHE}/Kim_Vocal_2.onnx'
 
 # Audio cutting parameters
 DEFAULT_SEGMENT_DURATION = 300  # 5 minutes max per segment
@@ -45,6 +52,184 @@ MAX_ATTEMPTS = 20
 
 OVERLAP_LARGE = 0.0001
 OVERLAP_SMALL = 1
+
+# Progress monitoring
+MONITOR_INTERVAL = 10  # seconds
+
+# Task states
+TASK_RUNNING = "running"
+TASK_NO_WORK = "no_work"
+TASK_DONE = "done"
+
+
+def check_models_ready():
+    """Check if ML models are extracted and ready."""
+    return os.path.exists(MODELS_READY_FILE)
+
+
+# =============================================================================
+# PROGRESS TRACKING
+# =============================================================================
+class ProgressTracker:
+    """Track progress to a JSON file for API consumption."""
+
+    def __init__(self, output_dir):
+        self.progress_file = Path(output_dir) / 'progress.txt'
+        self.start_time = time.time()
+        self._lock = threading.Lock()
+
+        # Check if models are ready
+        models_ready = check_models_ready()
+
+        # Task states
+        self.tasks = {
+            "models": TASK_DONE if models_ready else TASK_NO_WORK,
+            "cutting": TASK_NO_WORK,
+            "inference": TASK_NO_WORK,
+            "conversion": TASK_NO_WORK
+        }
+        self.details = {
+            "models_ready": models_ready
+        }
+
+    def set_task(self, task_name, state):
+        """Set a specific task state (running or no_work)."""
+        self.tasks[task_name] = state
+        self._write_progress()
+
+    def set_details(self, details):
+        """Set additional details for the current state."""
+        self.details = details
+        self._write_progress()
+
+    def update_details(self, **kwargs):
+        """Update specific detail fields."""
+        self.details.update(kwargs)
+        self._write_progress()
+
+    def _write_progress(self):
+        """Write current state to progress file."""
+        # Determine overall state based on tasks
+        if any(state == TASK_RUNNING for state in self.tasks.values()):
+            state = "demucs"
+        elif all(state == TASK_NO_WORK for state in self.tasks.values()):
+            if self.details.get('completed'):
+                state = "completed"
+            else:
+                state = "idle"
+        else:
+            state = "demucs"
+
+        data = {
+            'state': state,
+            'tasks': self.tasks.copy(),
+            'timestamp': time.time(),
+            'elapsed_seconds': round(time.time() - self.start_time, 1)
+        }
+
+        if self.details:
+            data['details'] = self.details
+
+        try:
+            with self._lock:
+                with open(self.progress_file, 'w') as f:
+                    json.dump(data, f, indent=2)
+        except Exception as e:
+            log_error(f"Failed to write progress: {e}")
+
+    def set_error(self, error_message):
+        """Set error state."""
+        models_state = self.tasks.get("models", TASK_NO_WORK)
+        self.tasks = {
+            "models": models_state,
+            "cutting": TASK_NO_WORK,
+            "inference": TASK_NO_WORK,
+            "conversion": TASK_NO_WORK
+        }
+        self.details = {
+            'error': error_message,
+            'models_ready': models_state == TASK_DONE
+        }
+
+        data = {
+            'state': 'error',
+            'tasks': self.tasks,
+            'timestamp': time.time(),
+            'elapsed_seconds': round(time.time() - self.start_time, 1),
+            'details': self.details
+        }
+
+        try:
+            with self._lock:
+                with open(self.progress_file, 'w') as f:
+                    json.dump(data, f, indent=2)
+        except Exception as e:
+            log_error(f"Failed to write progress: {e}")
+
+    def set_completed(self, details=None):
+        """Set completed state."""
+        models_state = self.tasks.get("models", TASK_NO_WORK)
+        self.tasks = {
+            "models": models_state,
+            "cutting": TASK_NO_WORK,
+            "inference": TASK_NO_WORK,
+            "conversion": TASK_NO_WORK
+        }
+        self.details = details or {}
+        self.details['completed'] = True
+        self.details['models_ready'] = models_state == TASK_DONE
+        self._write_progress()
+
+
+class DemucsMonitor:
+    """
+    Background monitor that watches the output directory for completed files.
+    Updates progress.txt every 10 seconds with the number of completed segments.
+    """
+
+    def __init__(self, progress_tracker, output_dir, total_segments):
+        self.progress = progress_tracker
+        self.output_dir = Path(output_dir)
+        self.total_segments = total_segments
+        self._stop_event = threading.Event()
+        self._thread = None
+
+    def _count_completed_segments(self):
+        """Count how many segments have been processed (have _instrum.wav files)."""
+        instrum_files = list(self.output_dir.glob('*_instrum.wav'))
+        return len(instrum_files)
+
+    def _monitor_loop(self):
+        """Background loop that checks for completed files every 10 seconds."""
+        while not self._stop_event.is_set():
+            completed = self._count_completed_segments()
+
+            # Update progress details
+            self.progress.update_details(
+                completed_segments=completed,
+                total_segments=self.total_segments,
+                percent=round((completed / self.total_segments) * 100, 1) if self.total_segments > 0 else 0
+            )
+
+            # Wait 10 seconds or until stopped
+            self._stop_event.wait(MONITOR_INTERVAL)
+
+    def start(self):
+        """Start the background monitoring thread."""
+        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._thread.start()
+        log(f"  Progress monitor started (checking every {MONITOR_INTERVAL}s)")
+
+    def stop(self):
+        """Stop the background monitoring thread."""
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        log("  Progress monitor stopped")
+
+
+# Global progress tracker
+progress = None
 
 
 # =============================================================================
@@ -221,7 +406,13 @@ def generate_auto_intervals(audio_duration, max_segment_duration=DEFAULT_SEGMENT
 
 def cut_audio_segments(input_file, output_dir, intervals):
     """Cut audio into segments at specified intervals."""
+    global progress
     log("Cutting audio into segments...")
+
+    # Set cutting task to running
+    if progress:
+        progress.set_task("cutting", TASK_RUNNING)
+        progress.set_details({'total_segments': len(intervals)})
 
     segments = []
     ext = input_file.suffix
@@ -248,6 +439,11 @@ def cut_audio_segments(input_file, output_dir, intervals):
             log_error(f"Failed to cut segment {idx}: {result.stderr}")
 
     log(f"  Created {len(segments)} audio segments")
+
+    # Set cutting task to no_work
+    if progress:
+        progress.set_task("cutting", TASK_NO_WORK)
+
     return segments
 
 
@@ -256,6 +452,8 @@ def cut_audio_segments(input_file, output_dir, intervals):
 # =============================================================================
 def run_demucs(input_files, output_folder, chunk_size, only_vocals=True):
     """Run Demucs with auto chunk reduction on OOM."""
+    global progress
+
     if isinstance(input_files, Path):
         input_files = [input_files]
 
@@ -263,72 +461,181 @@ def run_demucs(input_files, output_folder, chunk_size, only_vocals=True):
     log(f"  Output: {output_folder}")
     log(f"  Chunk size: {chunk_size}")
 
+    # Set inference task to running
+    if progress:
+        progress.set_task("inference", TASK_RUNNING)
+        progress.set_details({
+            'total_segments': len(input_files),
+            'completed_segments': 0,
+            'percent': 0
+        })
+
+    # Start background monitor
+    monitor = DemucsMonitor(progress, output_folder, len(input_files))
+    monitor.start()
+
     current_chunk = chunk_size
     attempt = 1
+    success = False
 
-    while attempt <= MAX_ATTEMPTS:
-        log(f"\n  Attempt {attempt} with chunk_size={current_chunk}...")
+    try:
+        while attempt <= MAX_ATTEMPTS:
+            log(f"\n  Attempt {attempt} with chunk_size={current_chunk}...")
 
-        # Clean partial results
-        for f in Path(output_folder).glob('*'):
-            if f.is_dir():
-                shutil.rmtree(f)
-            else:
-                f.unlink()
+            # Clean partial results
+            for f in Path(output_folder).glob('*'):
+                if f.is_dir():
+                    shutil.rmtree(f)
+                else:
+                    f.unlink()
+
+            cmd = [
+                'python3', INFERENCE_SCRIPT,
+                '--input_audio'] + [str(f) for f in input_files] + [
+                '--output_folder', str(output_folder),
+                '--large_gpu',
+                '--overlap_large', str(OVERLAP_LARGE),
+                '--overlap_small', str(OVERLAP_SMALL),
+                '--chunk_size', str(current_chunk)
+            ]
+
+            if only_vocals:
+                cmd.append('--only_vocals')
+
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                )
+
+                for line in process.stdout:
+                    if '%' in line or 'Processing' in line or 'Separating' in line:
+                        print(f"    {line.strip()}")
+
+                process.wait()
+
+                if process.returncode == 0:
+                    log(f"  Demucs completed successfully")
+                    success = True
+                    break
+
+            except Exception as e:
+                log_error(f"Demucs exception: {e}")
+
+            log(f"  Failed with chunk_size={current_chunk}")
+
+            if current_chunk <= MIN_CHUNK_SIZE:
+                log_error(f"Minimum chunk_size reached, cannot continue")
+                break
+
+            current_chunk = max(MIN_CHUNK_SIZE, current_chunk - CHUNK_REDUCTION)
+            log(f"  Reducing chunk_size to {current_chunk}")
+            attempt += 1
+
+        if not success:
+            log_error(f"Demucs failed after {attempt} attempts")
+
+    finally:
+        # Stop the monitor
+        monitor.stop()
+
+        # Set inference task to no_work
+        if progress:
+            progress.set_task("inference", TASK_NO_WORK)
+
+    return success
+
+
+# =============================================================================
+# CONCATENATION
+# =============================================================================
+def concatenate_instrumentals(demucs_output_dir, output_file):
+    """
+    Concatenate all instrumental WAV files into a single mono MP3.
+
+    Args:
+        demucs_output_dir: Directory containing segment_XXX_instrum.wav files
+        output_file: Path to output MP3 file
+    """
+    global progress
+    log("Concatenating instrumental files...")
+
+    # Set conversion task to running
+    if progress:
+        progress.set_task("conversion", TASK_RUNNING)
+
+    # Find all instrumental files, sorted by segment number
+    instrum_files = sorted(
+        Path(demucs_output_dir).glob('*_instrum.wav'),
+        key=lambda f: f.stem
+    )
+
+    if not instrum_files:
+        log_error("No instrumental files found to concatenate")
+        if progress:
+            progress.set_task("conversion", TASK_NO_WORK)
+        return False
+
+    log(f"  Found {len(instrum_files)} instrumental file(s)")
+
+    if len(instrum_files) == 1:
+        # Single file, just convert to mono MP3
+        log("  Single file, converting to mono MP3...")
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', str(instrum_files[0]),
+            '-ac', '1',  # Mono
+            '-c:a', 'libmp3lame',
+            '-q:a', '2',  # High quality VBR
+            str(output_file)
+        ]
+    else:
+        # Multiple files, concatenate then convert
+        log("  Concatenating multiple files...")
+
+        # Create concat file list
+        concat_list = Path(demucs_output_dir) / 'concat_list.txt'
+        with open(concat_list, 'w') as f:
+            for instrum_file in instrum_files:
+                # FFmpeg concat requires escaped paths
+                escaped_path = str(instrum_file).replace("'", "'\\''")
+                f.write(f"file '{escaped_path}'\n")
 
         cmd = [
-            'python3', INFERENCE_SCRIPT,
-            '--input_audio'] + [str(f) for f in input_files] + [
-            '--output_folder', str(output_folder),
-            '--large_gpu',
-            '--overlap_large', str(OVERLAP_LARGE),
-            '--overlap_small', str(OVERLAP_SMALL),
-            '--chunk_size', str(current_chunk)
+            'ffmpeg', '-y',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', str(concat_list),
+            '-ac', '1',  # Mono
+            '-c:a', 'libmp3lame',
+            '-q:a', '2',  # High quality VBR
+            str(output_file)
         ]
 
-        if only_vocals:
-            cmd.append('--only_vocals')
+    result = subprocess.run(cmd, capture_output=True, text=True)
 
-        try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
+    # Set conversion task to no_work
+    if progress:
+        progress.set_task("conversion", TASK_NO_WORK)
 
-            for line in process.stdout:
-                if '%' in line or 'Processing' in line or 'Separating' in line:
-                    print(f"    {line.strip()}")
-
-            process.wait()
-
-            if process.returncode == 0:
-                log(f"  Demucs completed successfully")
-                return True
-
-        except Exception as e:
-            log_error(f"Demucs exception: {e}")
-
-        log(f"  Failed with chunk_size={current_chunk}")
-
-        if current_chunk <= MIN_CHUNK_SIZE:
-            log_error(f"Minimum chunk_size reached, cannot continue")
-            break
-
-        current_chunk = max(MIN_CHUNK_SIZE, current_chunk - CHUNK_REDUCTION)
-        log(f"  Reducing chunk_size to {current_chunk}")
-        attempt += 1
-
-    log_error(f"Demucs failed after {attempt} attempts")
-    return False
+    if result.returncode == 0:
+        size_mb = output_file.stat().st_size / 1024 / 1024
+        log(f"  Created: {output_file} ({size_mb:.1f} MB)")
+        return True
+    else:
+        log_error(f"Failed to concatenate: {result.stderr}")
+        return False
 
 
 # =============================================================================
 # MAIN
 # =============================================================================
 def main():
+    global progress
+
     parser = argparse.ArgumentParser(
         description='Demucs audio separation - separate vocals from instrumental',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -349,6 +656,17 @@ Examples:
 
 Note: By default, audio files are automatically split into 5-minute segments.
       Use --interval-cut to specify custom cut points.
+
+Output:
+  - progress.txt: JSON file with current progress state (for API polling)
+  - demucs_results/: Individual segment separations
+  - instrumental.mp3: Final concatenated instrumental (mono)
+
+Progress states:
+  - state: "demucs" when work is running, "completed" when done, "error" on failure
+  - tasks.cutting: "running" or "no_work"
+  - tasks.inference: "running" or "no_work"
+  - tasks.conversion: "running" or "no_work"
 '''
     )
 
@@ -366,17 +684,21 @@ Note: By default, audio files are automatically split into 5-minute segments.
 
     only_vocals = not args.all_stems
 
+    # Create output directory
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Initialize progress tracker
+    progress = ProgressTracker(output_dir)
+
     # Check inference script
     if not os.path.exists(INFERENCE_SCRIPT):
         log_error(f"inference_demucs.py not found at {INFERENCE_SCRIPT}")
+        progress.set_error(f"Inference script not found")
         sys.exit(1)
 
     # Detect GPU
     chunk_size = detect_gpu()
-
-    # Create output directory
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Handle input
     temp_dir = None
@@ -394,12 +716,14 @@ Note: By default, audio files are automatically split into 5-minute segments.
             input_file = Path(temp_dir) / f'input{ext}'
 
             if not download_audio(args.input, input_file):
+                progress.set_error("Download failed")
                 sys.exit(1)
         else:
             # Local file
             input_file = Path(args.input)
             if not input_file.exists():
                 log_error(f"Input file not found: {input_file}")
+                progress.set_error(f"Input file not found: {input_file}")
                 sys.exit(1)
 
         # Get duration
@@ -418,6 +742,7 @@ Note: By default, audio files are automatically split into 5-minute segments.
             intervals = parse_intervals(args.interval_cut, duration)
 
             if intervals is None:
+                progress.set_error("Invalid interval format")
                 sys.exit(1)
         else:
             # Auto-generate intervals (max 5 min per segment)
@@ -435,6 +760,7 @@ Note: By default, audio files are automatically split into 5-minute segments.
 
             if not files_to_process:
                 log_error("No segments created")
+                progress.set_error("Failed to cut audio segments")
                 sys.exit(1)
         else:
             # Single segment, process full file
@@ -445,7 +771,21 @@ Note: By default, audio files are automatically split into 5-minute segments.
         demucs_output.mkdir(parents=True, exist_ok=True)
 
         if not run_demucs(files_to_process, demucs_output, chunk_size, only_vocals):
+            progress.set_error("Demucs separation failed")
             sys.exit(1)
+
+        # Concatenate instrumentals to mono MP3
+        final_instrumental = output_dir / 'instrumental.mp3'
+        if not concatenate_instrumentals(demucs_output, final_instrumental):
+            progress.set_error("Failed to concatenate instrumental files")
+            sys.exit(1)
+
+        # Mark as completed
+        progress.set_completed({
+            'segments': len(intervals),
+            'instrumental_file': str(final_instrumental),
+            'duration_seconds': duration
+        })
 
         # Summary
         log("\n" + "=" * 50)
@@ -457,10 +797,17 @@ Note: By default, audio files are automatically split into 5-minute segments.
             log(f"  Segments: {segments_dir} ({len(intervals)} files)")
 
         log(f"  Demucs results: {demucs_output}")
+        log(f"  Final instrumental: {final_instrumental}")
 
         # List output files
         output_files = list(demucs_output.rglob('*.mp3')) + list(demucs_output.rglob('*.wav'))
         log(f"  Files created: {len(output_files)}")
+
+    except Exception as e:
+        log_error(f"Unexpected error: {e}")
+        if progress:
+            progress.set_error(str(e))
+        sys.exit(1)
 
     finally:
         if temp_dir:

@@ -147,6 +147,8 @@ RUN chmod +x /start.sh
 COPY demucs-separate /usr/local/bin/demucs-separate
 RUN chmod +x /usr/local/bin/demucs-separate
 
+COPY server.py /workspace/server.py
+
 RUN mkdir -p /models-cache \
     && mkdir -p /root/.cache/torch/hub/checkpoints
 
