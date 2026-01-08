@@ -134,19 +134,45 @@ class RunPodClient:
 
     def find_cheapest_gpu(self) -> Optional[Dict]:
         """Find the cheapest available GPU."""
+        gpus = self.get_ranked_gpus()
+        return gpus[0] if gpus else None
+
+    def get_ranked_gpus(self, max_results: int = 10) -> List[Dict]:
+        """Get GPUs ranked by preference (preferred GPUs first, then by price)."""
         gpus = self.get_available_gpus()
 
         if not gpus:
-            return None
+            return []
 
-        # Prefer known good GPUs if available at similar price
+        # Build ranked list: preferred GPUs first (if cheap), then rest by price
+        ranked = []
+        used_ids = set()
+
+        # First: add preferred GPUs from top 10 cheapest
         for preferred in PREFERRED_GPUS:
-            for gpu in gpus[:5]:  # Check top 5 cheapest
-                if preferred.lower() in gpu["name"].lower():
-                    return gpu
+            for gpu in gpus[:10]:
+                if preferred.lower() in gpu["name"].lower() and gpu["id"] not in used_ids:
+                    ranked.append(gpu)
+                    used_ids.add(gpu["id"])
+                    break
 
-        # Otherwise return absolute cheapest
-        return gpus[0] if gpus else None
+        # Then: add remaining GPUs by price
+        for gpu in gpus:
+            if gpu["id"] not in used_ids:
+                ranked.append(gpu)
+                used_ids.add(gpu["id"])
+
+        return ranked[:max_results]
+
+    def try_create_pod(self, gpu_id: str, name: str = "demucs-worker") -> Optional[Dict]:
+        """Try to create a pod, return None if GPU unavailable."""
+        try:
+            return self.create_pod(gpu_id, name)
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "resources" in error_msg or "not have" in error_msg:
+                return None  # GPU unavailable, caller should try next
+            raise  # Other error, propagate
 
     def create_pod(self, gpu_id: str, name: str = "demucs-worker") -> Dict:
         """Create a new pod with the demucs template."""
@@ -405,21 +431,34 @@ def cmd_separate(args):
 
     runpod = RunPodClient(api_key)
 
-    # Find cheapest GPU
-    print("Finding cheapest GPU...")
-    gpu = runpod.find_cheapest_gpu()
+    # Get ranked GPUs
+    print("Finding available GPUs...")
+    gpus = runpod.get_ranked_gpus(max_results=10)
 
-    if not gpu:
+    if not gpus:
         print("Error: No GPU available")
         sys.exit(1)
 
-    print(f"Selected: {gpu['name']} ({gpu['vram_gb']}GB) @ ${gpu['price_per_hour']:.3f}/hr")
+    # Try to create pod with each GPU until one works
+    pod = None
+    selected_gpu = None
 
-    # Create pod
-    print("\nCreating pod...")
-    pod = runpod.create_pod(gpu["id"])
+    for gpu in gpus:
+        print(f"Trying: {gpu['name']} ({gpu['vram_gb']}GB) @ ${gpu['price_per_hour']:.3f}/hr")
+
+        pod = runpod.try_create_pod(gpu["id"])
+        if pod:
+            selected_gpu = gpu
+            break
+        else:
+            print(f"  -> Not available, trying next...")
+
+    if not pod:
+        print("Error: Could not find any available GPU. Try again later.")
+        sys.exit(1)
+
     pod_id = pod["id"]
-    print(f"Pod created: {pod_id}")
+    print(f"Pod created: {pod_id} on {selected_gpu['name']}")
 
     try:
         # Wait for pod
