@@ -120,12 +120,13 @@ class RunPodClient:
         for gpu in gpus:
             if gpu.get("memoryInGb", 0) >= MIN_VRAM_GB:
                 price_info = gpu.get("lowestPrice", {}) or {}
-                price = price_info.get("minimumBidPrice") or price_info.get("uninterruptablePrice") or 999
+                # Use on-demand price only (not spot/bid machines)
+                price = price_info.get("uninterruptablePrice") or 999
 
                 # Check stock availability
                 total = price_info.get("totalCount", 0) or 0
                 rented = price_info.get("rentedCount", 0) or 0
-                stock_status = price_info.get("stockStatus", "")
+                stock_status = price_info.get("stockStatus") or ""
 
                 # Skip if no stock available
                 available_count = total - rented
@@ -287,31 +288,25 @@ class RunPodClient:
         """Wait for pod to be ready and return the API URL."""
         print(f"Waiting for pod {pod_id} to be ready...")
 
+        # RunPod proxy URL format
+        proxy_url = f"https://{pod_id}-{API_PORT}.proxy.runpod.net"
+
         start = time.time()
+        first_try = True
         while time.time() - start < timeout:
-            pod = self.get_pod(pod_id)
+            # Test health endpoint via proxy
+            try:
+                if first_try:
+                    print(f"Trying: {proxy_url}/health")
+                    first_try = False
 
-            runtime = pod.get("runtime", {})
-            ports = runtime.get("ports", [])
-
-            # Find the API port
-            for port in ports:
-                if port.get("privatePort") == API_PORT:
-                    ip = port.get("ip")
-                    public_port = port.get("publicPort")
-
-                    if ip and public_port:
-                        url = f"http://{ip}:{public_port}"
-
-                        # Test health endpoint
-                        try:
-                            response = requests.get(f"{url}/health", timeout=5)
-                            if response.status_code == 200:
-                                print(f"Pod ready! API URL: {url}")
-                                self.pod_url = url
-                                return url
-                        except requests.exceptions.RequestException:
-                            pass
+                response = requests.get(f"{proxy_url}/health", timeout=10)
+                if response.status_code == 200:
+                    print(f"\nPod ready! API URL: {proxy_url}")
+                    self.pod_url = proxy_url
+                    return proxy_url
+            except requests.exceptions.RequestException as e:
+                pass
 
             print(".", end="", flush=True)
             time.sleep(5)

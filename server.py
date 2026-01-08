@@ -104,9 +104,9 @@ async def run_demucs_job(job_id: str, input_url: str, interval_cut: Optional[str
     JOBS[job_id]['status'] = 'running'
     JOBS[job_id]['started_at'] = datetime.now().isoformat()
 
-    # Build command
+    # Build command (demucs-separate is a bash script, not Python)
     cmd = [
-        'python3', DEMUCS_CLI,
+        DEMUCS_CLI,
         '--input', input_url,
         '--output', str(job_dir)
     ]
