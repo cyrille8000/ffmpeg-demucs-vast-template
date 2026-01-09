@@ -54,7 +54,7 @@ OVERLAP_LARGE = 0.0001
 OVERLAP_SMALL = 1
 
 # Progress monitoring
-MONITOR_INTERVAL = 10  # seconds
+MONITOR_INTERVAL = 5  # seconds
 
 # Task states
 TASK_RUNNING = "running"
@@ -200,18 +200,20 @@ class DemucsMonitor:
         return len(instrum_files)
 
     def _monitor_loop(self):
-        """Background loop that checks for completed files every 10 seconds."""
+        """Background loop that checks for completed files every 5 seconds."""
         while not self._stop_event.is_set():
             completed = self._count_completed_segments()
+            remaining = self.total_segments - completed
 
             # Update progress details
             self.progress.update_details(
                 completed_segments=completed,
                 total_segments=self.total_segments,
+                remaining_segments=remaining,
                 percent=round((completed / self.total_segments) * 100, 1) if self.total_segments > 0 else 0
             )
 
-            # Wait 10 seconds or until stopped
+            # Wait 5 seconds or until stopped
             self._stop_event.wait(MONITOR_INTERVAL)
 
     def start(self):
