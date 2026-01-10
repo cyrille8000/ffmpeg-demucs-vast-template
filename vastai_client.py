@@ -355,6 +355,25 @@ class DemucsClient:
         response.raise_for_status()
         return response.json()
 
+    def get_job_logs(self, job_id: str, offset: int = 0) -> Dict:
+        """
+        Get job logs from offset position.
+
+        Args:
+            job_id: Job ID
+            offset: Byte offset to start reading from
+
+        Returns:
+            {"logs": str, "offset": int, "status": str}
+        """
+        response = requests.get(
+            f"{self.base_url}/job/{job_id}/logs",
+            params={"offset": offset},
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()
+
     def download_result(self, job_id: str, output_path: str):
         """Download job result."""
         response = requests.get(f"{self.base_url}/result/{job_id}", stream=True, timeout=60)
@@ -364,26 +383,63 @@ class DemucsClient:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-    def wait_for_job(self, job_id: str, timeout: int = 1800) -> Dict:
-        """Wait for job to complete."""
+    def wait_for_job(self, job_id: str, timeout: int = 1800, stream_logs: bool = True) -> Dict:
+        """
+        Wait for job to complete with optional log streaming.
+
+        Args:
+            job_id: Job ID to wait for
+            timeout: Maximum wait time in seconds
+            stream_logs: If True, stream logs in real-time
+
+        Returns:
+            Final job status dict
+        """
         start = time.time()
+        log_offset = 0
+        last_status = None
 
         while time.time() - start < timeout:
             status = self.get_job_status(job_id)
 
             if status["status"] == "completed":
+                # Get final logs
+                if stream_logs:
+                    log_data = self.get_job_logs(job_id, log_offset)
+                    if log_data.get("logs"):
+                        print(log_data["logs"], end="")
                 return status
             elif status["status"] == "failed":
+                # Get final logs
+                if stream_logs:
+                    log_data = self.get_job_logs(job_id, log_offset)
+                    if log_data.get("logs"):
+                        print(log_data["logs"], end="")
                 raise Exception(f"Job failed: {status.get('error')}")
 
-            # Show progress
-            details = status.get("details", {})
-            completed = details.get("completed_segments", 0)
-            total = details.get("total_segments", 0)
+            # Stream logs if enabled
+            if stream_logs:
+                try:
+                    log_data = self.get_job_logs(job_id, log_offset)
+                    new_logs = log_data.get("logs", "")
+                    if new_logs:
+                        print(new_logs, end="", flush=True)
+                        log_offset = log_data.get("offset", log_offset)
+                except Exception as e:
+                    # Log streaming failed, fall back to progress display
+                    stream_logs = False
+                    print(f"\nLog streaming failed: {e}")
+                    print("Falling back to progress display...")
 
-            if total > 0:
-                percent = (completed / total) * 100
-                print(f"\rProgress: {percent:.0f}% ({completed}/{total})", end="", flush=True)
+            # Show progress if not streaming logs or as fallback
+            if not stream_logs:
+                details = status.get("details") or {}
+                completed = details.get("completed_segments", 0)
+                total = details.get("total_segments", 0)
+
+                if total > 0:
+                    percent = (completed / total) * 100
+                    print(f"\rProgress: {percent:.0f}% ({completed}/{total})", end="", flush=True)
 
             time.sleep(5)
 

@@ -21,7 +21,7 @@
 #   demucs-separate --help
 # =============================================================================
 
-FROM vastai/pytorch:cuda-13.0.2-auto
+FROM vastai/pytorch:cuda-13.0.2-py311-auto
 
 SHELL ["/bin/bash", "-c"]
 

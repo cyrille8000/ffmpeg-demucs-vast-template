@@ -236,6 +236,51 @@ async def get_job_status(job_id: str):
         error=job.get('error')
     )
 
+@app.get("/job/{job_id}/logs")
+async def get_job_logs(job_id: str, offset: int = 0):
+    """
+    Stream job logs with offset-based pagination.
+
+    Args:
+        job_id: Job ID
+        offset: Byte offset to start reading from (default: 0)
+
+    Returns:
+        {
+            "logs": "new log content since offset",
+            "offset": new_offset_position,
+            "status": "pending|running|completed|failed"
+        }
+    """
+    if job_id not in JOBS:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    job_dir = JOBS_DIR / job_id
+    log_file = job_dir / 'demucs.log'
+
+    # If log file doesn't exist yet, return empty
+    if not log_file.exists():
+        return {
+            "logs": "",
+            "offset": 0,
+            "status": JOBS[job_id]['status']
+        }
+
+    # Read from offset
+    try:
+        with open(log_file, 'r', encoding='utf-8') as f:
+            f.seek(offset)
+            new_content = f.read()
+            new_offset = f.tell()
+
+        return {
+            "logs": new_content,
+            "offset": new_offset,
+            "status": JOBS[job_id]['status']
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read logs: {e}")
+
 @app.get("/result/{job_id}")
 async def get_result(job_id: str, file: str = "instrumental.mp3"):
     """Download result file from completed job."""

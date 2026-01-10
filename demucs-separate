@@ -230,19 +230,43 @@ class DemucsMonitor:
         log("  Progress monitor stopped")
 
 
-# Global progress tracker
+# Global progress tracker and log file
 progress = None
+log_file_handle = None
 
 
 # =============================================================================
 # LOGGING
 # =============================================================================
+def init_log_file(output_dir):
+    """Initialize log file for streaming."""
+    global log_file_handle
+    log_file_path = Path(output_dir) / 'demucs.log'
+    log_file_handle = open(log_file_path, 'w', buffering=1)  # Line buffered
+
+
+def close_log_file():
+    """Close log file handle."""
+    global log_file_handle
+    if log_file_handle:
+        log_file_handle.close()
+        log_file_handle = None
+
+
 def log(msg):
-    print(f"[demucs-separate] {msg}")
+    """Log to both stdout and file."""
+    message = f"[demucs-separate] {msg}"
+    print(message)
+    if log_file_handle:
+        log_file_handle.write(message + '\n')
 
 
 def log_error(msg):
-    print(f"[demucs-separate] ERROR: {msg}", file=sys.stderr)
+    """Log error to both stderr and file."""
+    message = f"[demucs-separate] ERROR: {msg}"
+    print(message, file=sys.stderr)
+    if log_file_handle:
+        log_file_handle.write(message + '\n')
 
 
 # =============================================================================
@@ -690,6 +714,9 @@ Progress states:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Initialize log file
+    init_log_file(output_dir)
+
     # Initialize progress tracker
     progress = ProgressTracker(output_dir)
 
@@ -814,6 +841,7 @@ Progress states:
     finally:
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
+        close_log_file()
 
     log("\nDone!")
     return 0

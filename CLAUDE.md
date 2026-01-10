@@ -84,10 +84,13 @@ python test_concurrent_instances.py --destroy-all
 | `/status` | GET | Server status (models_ready, active_jobs) |
 | `/job` | POST | Create separation job |
 | `/job/{id}` | GET | Get job status + progress |
+| `/job/{id}/logs?offset=N` | GET | Stream logs with offset-based pagination |
 | `/result/{id}` | GET | Download result file |
 | `/jobs` | GET | List all jobs |
 
 ### Progress Tracking
+
+**Progress File (`progress.txt`):**
 Jobs write progress to `progress.txt` (JSON):
 ```json
 {
@@ -95,6 +98,24 @@ Jobs write progress to `progress.txt` (JSON):
   "tasks": {"cutting": "running|no_work", "inference": "...", "conversion": "..."},
   "details": {"completed_segments": 2, "total_segments": 4, "percent": 50.0}
 }
+```
+
+**Log Streaming (`demucs.log`):**
+Real-time logs written to `demucs.log` with line buffering. Access via:
+```bash
+# API endpoint (offset-based pagination)
+GET /job/{job_id}/logs?offset=0
+
+# Response
+{
+  "logs": "new content since offset",
+  "offset": 12345,  # New offset for next request
+  "status": "running|completed|failed"
+}
+
+# Client usage
+python vastai_client.py separate "https://..." --output ./results
+# Logs automatically stream to terminal in real-time
 ```
 
 ## ML Pipeline
