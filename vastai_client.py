@@ -16,6 +16,33 @@ from dataclasses import dataclass
 import requests
 
 # =============================================================================
+# ENVIRONMENT VARIABLES (Windows User Registry)
+# =============================================================================
+def get_env_var(name: str) -> Optional[str]:
+    """Get environment variable from os.environ or Windows registry."""
+    # First check os.environ
+    value = os.environ.get(name)
+    if value:
+        return value
+
+    # On Windows, try to read from user environment variables
+    if sys.platform == 'win32':
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Environment', 0, winreg.KEY_READ)
+            try:
+                value, _ = winreg.QueryValueEx(key, name)
+                winreg.CloseKey(key)
+                return value
+            except WindowsError:
+                winreg.CloseKey(key)
+        except Exception:
+            pass
+
+    return None
+
+
+# =============================================================================
 # CONSTANTS
 # =============================================================================
 VASTAI_API_URL = "https://console.vast.ai/api/v0"
@@ -188,8 +215,18 @@ class VastAIClient:
         try:
             result = self._request("GET", endpoint)
 
-            if "instances" in result and len(result["instances"]) > 0:
-                instance = result["instances"][0]
+            if "instances" in result:
+                # API returns object for single instance, array for list
+                instances_data = result["instances"]
+
+                # Handle both object and array responses
+                if isinstance(instances_data, dict):
+                    instance = instances_data
+                elif isinstance(instances_data, list) and len(instances_data) > 0:
+                    instance = instances_data[0]
+                else:
+                    return {"id": instance_id, "status": "not_found"}
+
                 return {
                     "id": instance.get("id"),
                     "status": instance.get("actual_status", "unknown"),
@@ -200,6 +237,8 @@ class VastAIClient:
                     "direct_port_count": instance.get("direct_port_count"),
                     "gpu_name": instance.get("gpu_name"),
                     "cost_per_hour": instance.get("dph_total", 0),
+                    "public_ipaddr": instance.get("public_ipaddr"),
+                    "ports": instance.get("ports", {}),
                 }
             else:
                 return {"id": instance_id, "status": "not_found"}
@@ -219,9 +258,11 @@ class VastAIClient:
             print(f"Error destroying instance: {e}")
             return False
 
-    def wait_for_instance_ready(self, instance_id: int, timeout: int = 300) -> Optional[str]:
+    def wait_for_instance_ready(self, instance_id: int, timeout: int = 600) -> Optional[str]:
         """
         Wait for instance to be ready and return API URL.
+
+        First boot can take 5-10min (model extraction ~3GB).
 
         Returns:
             API URL (http://host:port) or None if timeout
@@ -229,34 +270,44 @@ class VastAIClient:
         start = time.time()
 
         print(f"Waiting for instance {instance_id} to be ready...")
+        print("  (First boot: ~5-10min for model extraction)")
 
         while time.time() - start < timeout:
             instance = self.get_instance(instance_id)
             status = instance.get("status", "unknown")
 
             if status == "running":
-                # Instance is running, construct API URL
-                ssh_host = instance.get("ssh_host")
-                port_start = instance.get("direct_port_start")
+                # Instance is running, check if ports are assigned
+                public_ip = instance.get("public_ipaddr")
+                ports_map = instance.get("ports", {})
 
-                if ssh_host and port_start:
-                    # Map internal port 8185 to external port range
-                    api_port = port_start
-                    api_url = f"http://{ssh_host}:{api_port}"
+                # Look for port 8185/tcp in the ports mapping
+                api_port_info = ports_map.get("8185/tcp")
 
-                    # Test if API is responsive
-                    try:
-                        response = requests.get(f"{api_url}/health", timeout=5)
-                        if response.status_code == 200:
-                            print(f"Instance ready! API URL: {api_url}")
-                            return api_url
-                    except:
-                        pass
+                if public_ip and api_port_info and len(api_port_info) > 0:
+                    # Extract external port from mapping
+                    external_port = api_port_info[0].get("HostPort")
+
+                    if external_port:
+                        api_url = f"http://{public_ip}:{external_port}"
+
+                        # Test if API is responsive
+                        try:
+                            response = requests.get(f"{api_url}/health", timeout=5)
+                            if response.status_code == 200:
+                                elapsed = int(time.time() - start)
+                                print(f"\n  Instance ready! API URL: {api_url}")
+                                print(f"  Startup time: {elapsed}s")
+                                print(f"  Port mapping: 8185 -> {external_port}")
+                                return api_url
+                        except Exception as e:
+                            # API not ready yet, continue waiting
+                            pass
 
             print(".", end="", flush=True)
             time.sleep(10)
 
-        print(f"\nTimeout waiting for instance {instance_id}")
+        print(f"\nTimeout waiting for instance {instance_id} after {timeout}s")
         return None
 
 
@@ -344,7 +395,7 @@ class DemucsClient:
 # =============================================================================
 def cmd_list_offers(args):
     """List available GPU offers."""
-    client = VastAIClient(os.environ.get("VASTAI_API_KEY", ""))
+    client = VastAIClient(get_env_var("VASTAI_API_KEY") or "")
     offers = client.get_ranked_offers(max_results=20)
 
     print(f"\n{'GPU Name':<30} {'RAM':<8} {'$/hr':<10} {'Reliability':<12} {'CUDA'}")
@@ -358,7 +409,7 @@ def cmd_list_offers(args):
 
 def cmd_separate(args):
     """Full workflow: create instance, run job, download, destroy."""
-    api_key = os.environ.get("VASTAI_API_KEY")
+    api_key = get_env_var("VASTAI_API_KEY")
     if not api_key:
         print("ERROR: VASTAI_API_KEY not set")
         sys.exit(1)
@@ -391,7 +442,7 @@ def cmd_separate(args):
 
     try:
         # Wait for instance ready
-        api_url = vastai.wait_for_instance_ready(instance_id, timeout=300)
+        api_url = vastai.wait_for_instance_ready(instance_id, timeout=600)
         if not api_url:
             raise Exception("Instance failed to start")
 
@@ -424,7 +475,7 @@ def cmd_separate(args):
 
 def cmd_destroy(args):
     """Destroy an instance."""
-    api_key = os.environ.get("VASTAI_API_KEY")
+    api_key = get_env_var("VASTAI_API_KEY")
     if not api_key:
         print("ERROR: VASTAI_API_KEY not set")
         sys.exit(1)

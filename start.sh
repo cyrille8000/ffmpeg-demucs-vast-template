@@ -100,24 +100,15 @@ fi
 echo ""
 
 # =============================================================================
-# [4/5] INSTALLATION DEPENDENCIES SERVEUR
+# [4/4] LANCEMENT DES SERVICES
 # =============================================================================
-echo "[4/5] Installation dependencies serveur..."
-
-pip install --quiet fastapi uvicorn pydantic 2>/dev/null || echo "  Dependencies deja installees"
-echo ""
-
-# =============================================================================
-# [5/5] LANCEMENT DES SERVICES
-# =============================================================================
-echo "[5/5] Lancement des services..."
+echo "[4/4] Lancement des services..."
 echo ""
 echo "=============================================="
 echo "  PRET !"
 echo "=============================================="
 echo ""
-echo "  API Demucs:   http://localhost:8185"
-echo "  JupyterLab:   http://localhost:8888"
+echo "  API Demucs:   http://0.0.0.0:8185"
 echo "  Repertoire:   /workspace/mvsep"
 echo ""
 echo "  Endpoints API:"
@@ -136,15 +127,5 @@ echo ""
 
 cd /workspace
 
-# Copier le serveur si il n'existe pas encore
-if [ ! -f /workspace/server.py ]; then
-    cp /workspace/mvsep/../server.py /workspace/server.py 2>/dev/null || true
-fi
-
-# Lancer le serveur API en background
-python3 /workspace/server.py &
-API_PID=$!
-echo "  Serveur API demarre (PID: $API_PID)"
-
-# Lancer JupyterLab en foreground
-jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''
+# Lancer le serveur API en foreground
+exec python3 /workspace/server.py

@@ -89,7 +89,10 @@ RUN pip install --no-cache-dir \
     decorator \
     coloredlogs \
     flatbuffers \
-    protobuf
+    protobuf \
+    fastapi \
+    uvicorn \
+    pydantic
 
 # =============================================================================
 # [4/7] COPIER LE DOSSIER MVSEP
@@ -154,6 +157,6 @@ RUN mkdir -p /models-cache \
 
 WORKDIR /workspace/mvsep
 
-EXPOSE 8888 8185
+EXPOSE 8185
 
 CMD ["/start.sh"]
